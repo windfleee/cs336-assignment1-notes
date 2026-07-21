@@ -59,4 +59,35 @@ class Embedding(nn.Module):
         # - 用 token_ids 对 self.weight 做索引
         # - 输入形状 (...) → 输出形状 (..., embedding_dim)
         return self.weight[token_ids]
+    
+class RMSNorm(nn.Module):
+    """Root Mean Square Layer Normalization.
 
+    This is a simplified version of LayerNorm that only normalizes by the root mean square
+    of the input, without centering or scaling by learned parameters.
+    """
+    def __init__(
+        self,
+        normalized_shape: int,  # 输入特征的维度（最后一维的大小）
+        eps: float = 1e-8,      # 防止除零的小常数
+        device: torch.device | None = None,
+        dtype: torch.dtype | None = None,
+    ):
+        super().__init__()
+        self.normalized_shape = normalized_shape
+        #初始化权重参数
+        self.weight = nn.Parameter(torch.ones(normalized_shape, device=device, dtype=dtype))
+        self.eps = eps
+        
+    def forward(self, x: Float[Tensor, "... normalized_shape"]) -> Float[Tensor, "... normalized_shape"]:
+        # TODO: 实现 RMSNorm
+        xdtype = x.dtype
+        x = x.to(torch.float32)  # 为了数值稳定性，先转换为 float32
+        #最后一维算平均
+        mean_square = x.pow(2).mean(dim=-1, keepdim=True)
+        #计算rms
+        rms = (mean_square + self.eps).sqrt()
+        #乘上缩放系数
+        x_norm = x / rms * self.weight
+
+        return x_norm.to(xdtype)  # 转回原来的数据类型
