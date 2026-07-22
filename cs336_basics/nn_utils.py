@@ -91,3 +91,25 @@ class RMSNorm(nn.Module):
         x_norm = x / rms * self.weight
 
         return x_norm.to(xdtype)  # 转回原来的数据类型
+
+def softmax(in_features: Float[Tensor, " ..."], dim: int) -> Float[Tensor, " ..."]:
+    """
+    Given a tensor of inputs, return the output of softmaxing the given `dim`
+    of the input.
+
+    Args:
+        in_features (Float[Tensor, "..."]): Input features to softmax. Shape is arbitrary.
+        dim (int): Dimension of the `in_features` to apply softmax to.
+
+    Returns:
+        Float[Tensor, "..."]: Tensor of with the same shape as `in_features` with the output of
+        softmax normalizing the specified `dim`.
+    """
+    #取dim维度的最大值
+    maxx = torch.max(in_features,dim=dim,keepdim=True).values
+    #减去最大值后，取exp
+    in_features_exp = torch.exp(in_features - maxx)
+    #求和
+    in_features_exp_sum = torch.sum(in_features_exp,dim = dim,keepdim = True)
+    #按元素相除
+    return in_features_exp / in_features_exp_sum
