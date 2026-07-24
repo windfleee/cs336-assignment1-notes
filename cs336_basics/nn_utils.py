@@ -221,3 +221,68 @@ class RotaryPositionalEmbedding(nn.Module):
         x_rotated[..., 1] = x_reshaped[..., 0] * sin + x_reshaped[..., 1] * cos   
         # TODO: 3. reshape 回原始形状并返回
         return x_rotated.view_as(x)
+
+
+class MultiHeadSelfAttention(nn.Module):
+    """Causal multi-head self-attention.
+
+    Supports optional Rotary Position Embedding (RoPE).
+    """
+
+    def __init__(
+        self,
+        d_model: int,
+        num_heads: int,
+        use_rope: bool = False,
+        theta: float | None = None,
+        max_seq_len: int | None = None,
+        device: torch.device | None = None,
+        dtype: torch.dtype | None = None,
+    ):
+        super().__init__()
+        assert d_model % num_heads == 0, "d_model must be divisible by num_heads"
+
+        self.d_model = d_model
+        self.num_heads = num_heads
+        self.d_k = d_model // num_heads
+        self.use_rope = use_rope
+        # TODO: 创建四个投影层 q_proj, k_proj, v_proj, o_proj（用 Linear 类）
+        self.q_proj = Linear(d_model, d_model, device=device, dtype=dtype)
+        self.k_proj = Linear(d_model, d_model, device=device, dtype=dtype)
+        self.v_proj = Linear(d_model, d_model, device=device, dtype=dtype)
+        self.o_proj = Linear(d_model, d_model, device=device, dtype=dtype)
+        # TODO: 如果 use_rope=True，创建 RotaryPositionalEmbedding 实例
+        #       需要 theta, d_k, max_seq_len 参数
+        if use_rope:
+            assert theta is not None, "theta must be provided if use_rope is True"
+            assert max_seq_len is not None, "max_seq_len must be provided if use_rope is True"
+            self.rope = RotaryPositionalEmbedding(theta, self.d_k, max_seq_len, device=device)
+
+    def forward(
+        self,
+        x: Float[Tensor, "... seq_len d_model"],
+        token_positions: Int[Tensor, "... seq_len"] | None = None,
+    ) -> Float[Tensor, "... seq_len d_model"]:
+        # TODO: 1. 投影 Q, K, V
+        Q = self.q_proj(x)  # (..., seq_len, d_model)
+        K = self.k_proj(x)  # (..., seq_len, d_model)
+        V = self.v_proj(x)  # (..., seq_len, d_model)
+        # TODO: 2. 拆分多头 (reshape + transpose)
+        # Q, K, V: (..., seq_len, d_model) → (..., seq_len, num_heads, d_k) → (..., num_heads, seq_len, d_k)
+        Q = Q.reshape(*Q.shape[:-1], self.num_heads, self.d_k).transpose(-3, -2)  # (..., num_heads, seq_len, d_k)
+        K = K.reshape(*K.shape[:-1], self.num_heads, self.d_k).transpose(-3, -2)  # (..., num_heads, seq_len, d_k)
+        V = V.reshape(*V.shape[:-1], self.num_heads, self.d_k).transpose(-3, -2)  # (..., num_heads, seq_len, d_k)
+        # TODO: 3. 如果 use_rope，对 Q 和 K 应用 RoPE
+        if self.use_rope:
+            assert token_positions is not None, "token_positions must be provided if use_rope is True"
+            Q = self.rope(Q, token_positions)  # (..., num_heads, seq_len, d_k)
+            K = self.rope(K, token_positions)  # (..., num_heads, seq_len, d_k)
+        # TODO: 4. 构建因果 mask（下三角布尔矩阵）
+        mask = torch.tril(torch.ones((x.shape[-2], x.shape[-2]), device=x.device, dtype=torch.bool))  # (seq_len, seq_len)
+        # TODO: 5. 调用 scaled_dot_product_attention(Q, K, V, mask)
+        attn_output = scaled_dot_product_attention(Q, K, V, mask)  # (..., num_heads, seq_len, d_k)
+        # TODO: 6. 合并多头 (transpose + reshape)
+        res = attn_output.transpose(-3, -2).reshape(*attn_output.shape[:-3], x.shape[-2], self.d_model)  # (..., seq_len, d_model)
+        # TODO: 7. 输出投影
+        res = self.o_proj(res)  # (..., seq_len, d_model)
+        return res
