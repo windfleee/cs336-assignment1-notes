@@ -1,7 +1,10 @@
+from __future__ import annotations
+
 import torch
 import torch.nn as nn
-from jaxtyping import Float, Int
+from jaxtyping import Float, Int, Bool
 from torch import Tensor
+
 
 
 class Linear(nn.Module):
@@ -113,3 +116,108 @@ def softmax(in_features: Float[Tensor, " ..."], dim: int) -> Float[Tensor, " ...
     in_features_exp_sum = torch.sum(in_features_exp,dim = dim,keepdim = True)
     #按元素相除
     return in_features_exp / in_features_exp_sum
+
+def scaled_dot_product_attention(
+    Q: Float[Tensor, " ... queries d_k"],
+    K: Float[Tensor, " ... keys d_k"],
+    V: Float[Tensor, " ... keys d_v"],
+    mask: Bool[Tensor, " ... queries keys"] | None
+) -> Float[Tensor, " ... queries d_v"]:
+    """
+    Given query, key, and value tensors, compute the scaled dot product attention.
+
+    Args:
+        Q (Float[Tensor, "... queries d_k"]): Query tensor.
+        K (Float[Tensor, "... keys d_k"]): Key tensor.
+        V (Float[Tensor, "... keys d_v"]): Value tensor.
+        mask (Bool[Tensor, "... queries keys"] | None): Optional mask tensor. If provided,
+            it should be broadcastable to the shape of the attention scores.
+
+    Returns:
+        Float[Tensor, "... queries d_v"]: The result of applying scaled dot product attention.
+    """
+    # Step 1: 计算 scaled attention scores
+    # Q:      (..., queries, d_k)
+    # K^T:    (..., d_k, keys)
+    # scores: (..., queries, keys)
+    qkt = torch.matmul(Q, K.transpose(-2, -1)) / (Q.shape[-1] ** 0.5)
+
+    # Step 2: 应用 mask（True=保留, False→-inf）
+    if mask is not None:
+        qkt = qkt.masked_fill(mask == False, float('-inf'))
+
+    # Step 3: softmax 沿 keys 维度归一化 → (..., queries, keys)
+    scaled_attention = softmax(qkt, dim=-1)
+
+    # Step 4: 加权聚合 values
+    # attn:   (..., queries, keys)
+    # V:      (..., keys, d_v)
+    # output: (..., queries, d_v)
+    return scaled_attention @ V
+
+
+class RotaryPositionalEmbedding(nn.Module):
+    """Applies Rotary Position Embedding (RoPE) to query or key tensors.
+
+    RoPE encodes position information by rotating pairs of dimensions
+    in the input tensor according to the token's position.
+    """
+
+    def __init__(
+        self,
+        theta: float,
+        d_k: int,
+        max_seq_len: int,
+        device: torch.device | None = None,
+    ):
+        """Construct the RoPE module and precompute cos/sin buffers.
+
+        Args:
+            theta: Θ value controlling the base rotation frequency.
+            d_k: Dimension of query/key vectors (must be even).
+            max_seq_len: Maximum sequence length to precompute for.
+            device: Device for the precomputed buffers.
+        """
+        super().__init__()
+        self.theta = theta
+        self.d_k = d_k
+        self.max_seq_len = max_seq_len
+        self.device = device
+        # TODO: 1. 计算频率向量 freqs[i] = 1.0 / (theta ** (2*i / d_k))，形状 (d_k // 2,)
+        i = torch.arange(d_k // 2, device=device)  # (d_k // 2,)
+        freqs = 1.0 / (theta ** (2 * i / d_k    )).reshape(1, d_k // 2)  # (d_k // 2,)
+        # TODO: 2. 计算所有位置的角度矩阵 positions @ freqs，形状 (max_seq_len, d_k // 2)
+        positions = torch.arange(max_seq_len,device=device,dtype=torch.float32).reshape(max_seq_len, 1)  # (max_seq_len, 1)
+        angle = positions @ freqs  # (max_seq_len, d_k // 2) 
+        # TODO: 3. 计算 cos 和 sin，每个角度重复一次以匹配 d_k 维度
+        cos_cached = torch.cos(angle)  # (max_seq_len, d_k//2)
+        sin_cached = torch.sin(angle)  # (max_seq_len, d_k//2)
+        # TODO: 4. 用 register_buffer 保存 cos_cached 和 sin_cached，形状均为 (max_seq_len, d_k)
+        self.register_buffer("cos_cached", cos_cached)
+        self.register_buffer("sin_cached", sin_cached)
+
+    def forward(
+        self,
+        x: Float[Tensor, "... seq_len d_k"],
+        token_positions: Int[Tensor, "... seq_len"],
+    ) -> Float[Tensor, "... seq_len d_k"]:
+        """Apply RoPE to the input tensor.
+
+        Args:
+            x: Input tensor of shape (..., seq_len, d_k).
+            token_positions: Token position indices of shape (..., seq_len).
+
+        Returns:
+            Tensor of same shape as x with RoPE applied.
+        """
+        # TODO: 1. 用 token_positions 从 cos_cached / sin_cached 中取出对应位置的旋转系数
+        #       得到形状 (..., seq_len, d_k) 的 cos 和 sin
+        cos = self.cos_cached[token_positions]  # (..., seq_len, d_k)
+        sin = self.sin_cached[token_positions]  # (..., seq_len, d_k)
+        # TODO: 2. 将 x reshape 为 (..., seq_len, d_k//2, 2)，对每对维度施加旋转
+        x_reshaped = x.view(*x.shape[:-1], self.d_k // 2, 2)  # (..., seq_len, d_k//2, 2)
+        x_rotated = torch.empty_like(x_reshaped)
+        x_rotated[..., 0] = x_reshaped[..., 0] * cos - x_reshaped[..., 1] * sin
+        x_rotated[..., 1] = x_reshaped[..., 0] * sin + x_reshaped[..., 1] * cos   
+        # TODO: 3. reshape 回原始形状并返回
+        return x_rotated.view_as(x)
