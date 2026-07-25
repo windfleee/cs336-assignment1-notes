@@ -286,3 +286,44 @@ class MultiHeadSelfAttention(nn.Module):
         # TODO: 7. 输出投影
         res = self.o_proj(res)  # (..., seq_len, d_model)
         return res
+
+
+def silu(in_features: Float[Tensor, " ..."]) -> Float[Tensor, " ..."]:
+    """Apply SiLU activation element-wise.
+
+    SiLU(x) = x * sigmoid(x)
+    """
+    # TODO: 实现 SiLU(x) = x * sigmoid(x)
+    return in_features * torch.sigmoid(in_features)
+
+class SwiGLU(nn.Module):
+    """SwiGLU feed-forward network.
+
+    SwiGLU(x) = (SiLU(x @ W1^T) * (x @ W3^T)) @ W2^T
+    """
+
+    def __init__(
+        self,
+        d_model: int,    # 输入/输出维度
+        d_ff: int,       # 内部 FFN 维度
+        device: torch.device | None = None,
+        dtype: torch.dtype | None = None,
+    ):
+        super().__init__()
+        # TODO: 创建三个 Linear 层
+        # W1: (d_ff, d_model) — gate 通路
+        # W2: (d_model, d_ff) — 输出投影
+        # W3: (d_ff, d_model) — up 通路
+        self.d_ff = d_ff
+        self.d_model = d_model
+        self.w1 = Linear(d_model,d_ff,device=device, dtype=dtype) 
+        self.w2 = Linear(d_ff,d_model, device=device, dtype=dtype)  # TODO
+        self.w3 = Linear(d_model, d_ff, device=device, dtype=dtype)  # TODO
+    def forward(
+        self, x: Float[Tensor, "... d_model"]
+    ) -> Float[Tensor, "... d_model"]:
+        # TODO: 实现 SwiGLU(x) = (SiLU(x @ W1^T) * (x @ W3^T)) @ W2^T
+        # Step 1: gate = silu(x @ W1^T)   → (..., d_ff)
+        # Step 2: up   = x @ W3^T         → (..., d_ff)
+        # Step 3: output = (gate * up) @ W2^T  → (..., d_model)
+        return self.w2(silu(self.w1(x)) * self.w3(x))
