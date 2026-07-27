@@ -72,7 +72,7 @@ class RMSNorm(nn.Module):
     def __init__(
         self,
         normalized_shape: int,  # 输入特征的维度（最后一维的大小）
-        eps: float = 1e-8,      # 防止除零的小常数
+        eps: float = 1e-5,      # 防止除零的小常数
         device: torch.device | None = None,
         dtype: torch.dtype | None = None,
     ):
@@ -246,11 +246,11 @@ class MultiHeadSelfAttention(nn.Module):
         self.num_heads = num_heads
         self.d_k = d_model // num_heads
         self.use_rope = use_rope
-        # TODO: 创建四个投影层 q_proj, k_proj, v_proj, o_proj（用 Linear 类）
+        # TODO: 创建四个投影层 q_proj, k_proj, v_proj, output_proj（用 Linear 类）
         self.q_proj = Linear(d_model, d_model, device=device, dtype=dtype)
         self.k_proj = Linear(d_model, d_model, device=device, dtype=dtype)
         self.v_proj = Linear(d_model, d_model, device=device, dtype=dtype)
-        self.o_proj = Linear(d_model, d_model, device=device, dtype=dtype)
+        self.output_proj = Linear(d_model, d_model, device=device, dtype=dtype)
         # TODO: 如果 use_rope=True，创建 RotaryPositionalEmbedding 实例
         #       需要 theta, d_k, max_seq_len 参数
         if use_rope:
@@ -284,7 +284,7 @@ class MultiHeadSelfAttention(nn.Module):
         # TODO: 6. 合并多头 (transpose + reshape)
         res = attn_output.transpose(-3, -2).reshape(*attn_output.shape[:-3], x.shape[-2], self.d_model)  # (..., seq_len, d_model)
         # TODO: 7. 输出投影
-        res = self.o_proj(res)  # (..., seq_len, d_model)
+        res = self.output_proj(res)  # (..., seq_len, d_model)
         return res
 
 
@@ -327,3 +327,113 @@ class SwiGLU(nn.Module):
         # Step 2: up   = x @ W3^T         → (..., d_ff)
         # Step 3: output = (gate * up) @ W2^T  → (..., d_model)
         return self.w2(silu(self.w1(x)) * self.w3(x))
+
+
+class TransformerBlock(nn.Module):
+    """Pre-norm Transformer block with RoPE and SwiGLU.
+
+    Architecture:
+        x = x + MHA(RMSNorm_1(x), rope)
+        x = x + SwiGLU(RMSNorm_2(x))
+    """
+
+    def __init__(
+        self,
+        d_model: int,
+        num_heads: int,
+        d_ff: int,
+        max_seq_len: int,
+        theta: float,
+        device: torch.device | None = None,
+        dtype: torch.dtype | None = None,
+    ):
+        super().__init__()
+        # TODO: 创建两个 RMSNorm: ln1, ln2
+        self.ln1 = RMSNorm(normalized_shape = d_model,device= device,dtype=dtype) # RMSNorm(d_model)
+        self.ln2 = RMSNorm(normalized_shape = d_model,device= device,dtype=dtype) # RMSNorm(d_model)
+
+        # TODO: 创建带 RoPE 的 MHA
+        self.attn = MultiHeadSelfAttention(
+            d_model=d_model,
+            num_heads= num_heads,
+            use_rope=True,
+            theta=theta,
+            max_seq_len=max_seq_len,
+            device = device,
+            dtype = dtype
+            )  # MultiHeadSelfAttention(d_model, num_heads, use_rope=True, ...)
+
+        # TODO: 创建 SwiGLU FFN
+        self.ffn = SwiGLU(
+            d_model= d_model,
+            d_ff = d_ff,
+            device = device,
+            dtype = dtype
+        )  # SwiGLU(d_model, d_ff)
+
+    def forward(
+        self, x: Float[Tensor, "batch seq_len d_model"]
+    ) -> Float[Tensor, "batch seq_len d_model"]:
+        # TODO: Pre-norm 结
+        # 1. x = x + attn(ln1(x))   — MHA 子层
+        # 2. x = x + ffn(ln2(x))    — FFN 子层
+        seq_len = x.shape[-2]
+        token_position = torch.arange(seq_len)
+        a = x + self.attn( self.ln1(x) ,token_positions = token_position )
+        b = a + self.ffn ( self.ln2(a) )
+        return b
+
+
+class TransformerLM(nn.Module):
+    """Transformer language model.
+
+    Architecture:
+        token_ids → Embedding → TransformerBlock × N → RMSNorm → Linear → logits
+    """
+
+    def __init__(
+        self,
+        vocab_size: int,
+        context_length: int,
+        d_model: int,
+        num_layers: int,
+        num_heads: int,
+        d_ff: int,
+        rope_theta: float,
+        device: torch.device | None = None,
+        dtype: torch.dtype | None = None,
+    ):
+        super().__init__()
+        # TODO: 1. Token Embedding
+        self.token_embeddings = Embedding(vocab_size,d_model)  # Embedding(vocab_size, d_model)
+        # TODO: 2. Transformer Blocks 
+        self.layers = nn.ModuleList(
+            [
+            TransformerBlock(
+                d_model=d_model,
+                num_heads=num_heads,
+                d_ff = d_ff,
+                max_seq_len = context_length,
+                theta = rope_theta,
+                device = device,
+                dtype = dtype
+                )
+            for _ in range(num_layers)
+            ] 
+        ) # nn.ModuleList([TransformerBlock(...) for _ in range(num_layers)])
+        # TODO: 3. 最终 RMSNorm
+        self.ln_final = RMSNorm(normalized_shape = d_model)  # RMSNorm(d_model, eps=1e-5)
+        # TODO: 4. LM Head (输出投影到 vocab_size)
+        self.lm_head = Linear(d_model,vocab_size)  # Linear(d_model, vocab_size)
+    def forward(
+        self, in_indices: Int[Tensor, "batch seq_len"]
+    ) -> Float[Tensor, "batch seq_len vocab_size"]:
+        # TODO: 1. Embedding 查表
+        x = self.token_embeddings(in_indices)
+        # TODO: 2. 逐层过 TransformerBlock
+        for i in range(len(self.layers)):
+            x = self.layers[i](x)
+        # TODO: 3. 最终 RMSNorm
+        x = self.ln_final(x)
+        # TODO: 4. LM Head 输出 logits
+        return self.lm_head(x)
